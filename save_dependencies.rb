@@ -1,17 +1,10 @@
-require 'bundler/inline'
-
-gemfile do
-  source 'https://rubygems.org'
-  gem 'crystalball', '~> 0.7.0'
-  gem 'neo4j-core'
-  gem 'pry'
-  gem 'rspec-core'
-  gem 'parser'
-end
+require 'bundler/setup'
+Bundler.setup(:default)
 
 require 'crystalball/map_generator/parser_strategy/processor'
 require 'pry'
 
+# This is a fix on crystalball's processor that should be backported there
 class Crystalball::MapGenerator::ParserStrategy::Processor
   def on_send(node)
     const = filtered_children(node).detect { |c| c.type == :const }
@@ -27,9 +20,9 @@ class Crystalball::MapGenerator::ParserStrategy::Processor
 end
 
 root = File.expand_path(ARGV[0])
-files = Dir.glob(File.join(root, '**/*.rb')) # .grep(/^((?!\_spec\.rb).)*$/)
+files = Dir.glob(File.join(root, '**/*.rb'))
 
-nodes = files.map do |file|
+nodes = files[0..100].map do |file|
   processor = Crystalball::MapGenerator::ParserStrategy::Processor.new
   {
     path: file.sub(root, ''),
@@ -40,29 +33,55 @@ nodes = files.map do |file|
 end
 
 require 'neo4j/core/cypher_session/adaptors/http'
+# Adapt to your config
 http_adaptor = Neo4j::Core::CypherSession::Adaptors::HTTP.new('http://neo4j:batata@localhost:7474')
 connection = Neo4j::Core::CypherSession.new(http_adaptor)
 
-query = nodes.reduce('') do |result, node|
-  identifier = node[:path].gsub(/[^a-zA-Z1-9]/, '_')
-  q = ''
+nodes.each do |node|
   node[:consts_defined].each do |const|
-    id = q.include?(identifier) || result.include?(identifier) ? identifier : "#{identifier}:#{node[:labels]} {path: \"#{node[:path]}\"}"
-    const_identifier = const.gsub(/[^a-zA-Z1-9]/, '_')
-    #q << "(#{identifier})-[:defines]->(#{const_identifier}:Const {name: \"#{const}\"}),"
-    const_id = q.include?(const_identifier) || result.include?(const_identifier)? const_identifier : "#{const_identifier}:Const {name: \"#{const}\"}"
-    q << "(#{id})-[:defines]->(#{const_id}),"
+    query = <<~QUERY
+      MATCH (file:#{node[:labels]} {path: "#{node[:path]}"})
+      MATCH (const:Const {name: "#{const}"})
+      MERGE (file)-[:defines]->(const)
+    QUERY
+    puts "====", query, "===="
+    connection.query(query)
   end
   node[:consts_interacted_with].each do |const|
-    id = q.include?(identifier) || result.include?(identifier) ? identifier : "#{identifier}:#{node[:labels]} {path: \"#{node[:path]}\"}"
-    const_identifier = const.gsub(/[^a-zA-Z1-9]/, '_')
-    const_id = q.include?(const_identifier) || result.include?(const_identifier)? const_identifier : "#{const_identifier}:Const {name: \"#{const}\"}"
-    q << "(#{id})-[:interacts_with]->(#{const_id}),"
+    query = <<~QUERY
+      MATCH (file:#{node[:labels]} {path: "#{node[:path]}"})
+      MATCH (const:Const {name: "#{const}"})
+      MERGE (file)-[:interacts_with]->(const)
+    QUERY
+    puts "====", query, "===="
+    connection.query(query)
   end
-  result << "#{q[0..-2]}\n," unless q.empty?
-  result
-end[0..-2]
+end
 
-connection.query("CREATE #{query}")
+# if you have an endpoint that returns a json in the format
+# { spec_path: time_in_seconds, other_spec_path: time_in_seconds ... }
+# configure the environment variable SPEC_TIMES_URL with the url
+if ENV['SPEC_TIMES_URL']
+  require 'faraday'
+
+  specs = JSON.parse(Faraday.get(ENV['SPEC_TIMES_URL']).body)
+  specs.each do |path, time|
+    query = <<~QUERY
+      MATCH (spec:Spec {path: "/#{path}"})
+      SET spec.time = #{time}
+      RETURN spec
+    QUERY
+    puts "====", query, "===="
+    connection.query(query)
+  end
+  # When api does not have time values for all specs, set a random one below 1 second
+  query = <<~QUERY
+    MATCH (spec:Spec)
+    WHERE spec.time IS NULL
+    SET spec.time = RAND()
+  QUERY
+  puts "====", query, "===="
+  connection.query(query)
+end
 
 puts "Done"
