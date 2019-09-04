@@ -22,7 +22,7 @@ end
 root = File.expand_path(ARGV[0])
 files = Dir.glob(File.join(root, '**/*.rb'))
 
-nodes = files[0..100].map do |file|
+nodes = files.map do |file|
   processor = Crystalball::MapGenerator::ParserStrategy::Processor.new
   {
     path: file.sub(root, ''),
@@ -37,24 +37,28 @@ require 'neo4j/core/cypher_session/adaptors/http'
 http_adaptor = Neo4j::Core::CypherSession::Adaptors::HTTP.new('http://neo4j:batata@localhost:7474')
 connection = Neo4j::Core::CypherSession.new(http_adaptor)
 
+def create_relationship(node, const, relationship:, connection:)
+  execute_query("MERGE (:#{node[:labels]} {path: \"#{node[:path]}\"})", connection)
+  execute_query("MERGE (:Const {name: \"#{const}\"})", connection)
+  query = <<~QUERY
+    MATCH (file:#{node[:labels]} {path: "#{node[:path]}"})
+    MATCH (const:Const {name: "#{const}"})
+    MERGE (file)-[:#{relationship}]->(const)
+  QUERY
+  execute_query(query, connection)
+end
+
+def execute_query(query, connection)
+  puts "====", query, "===="
+  connection.query(query)
+end
+
 nodes.each do |node|
   node[:consts_defined].each do |const|
-    query = <<~QUERY
-      MATCH (file:#{node[:labels]} {path: "#{node[:path]}"})
-      MATCH (const:Const {name: "#{const}"})
-      MERGE (file)-[:defines]->(const)
-    QUERY
-    puts "====", query, "===="
-    connection.query(query)
+    create_relationship(node, const, relationship: :defines, connection: connection)
   end
   node[:consts_interacted_with].each do |const|
-    query = <<~QUERY
-      MATCH (file:#{node[:labels]} {path: "#{node[:path]}"})
-      MATCH (const:Const {name: "#{const}"})
-      MERGE (file)-[:interacts_with]->(const)
-    QUERY
-    puts "====", query, "===="
-    connection.query(query)
+    create_relationship(node, const, relationship: :interacts_with, connection: connection)
   end
 end
 
@@ -71,8 +75,7 @@ if ENV['SPEC_TIMES_URL']
       SET spec.time = #{time}
       RETURN spec
     QUERY
-    puts "====", query, "===="
-    connection.query(query)
+    execute_query(query, connection)
   end
   # When api does not have time values for all specs, set a random one below 1 second
   query = <<~QUERY
@@ -80,8 +83,7 @@ if ENV['SPEC_TIMES_URL']
     WHERE spec.time IS NULL
     SET spec.time = RAND()
   QUERY
-  puts "====", query, "===="
-  connection.query(query)
+  execute_query(query, connection)
 end
 
 puts "Done"
