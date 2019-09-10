@@ -19,33 +19,51 @@ class Crystalball::MapGenerator::ParserStrategy::Processor
   end
 end
 
-root = File.expand_path(ARGV[0])
-files = Dir.glob(File.join(root, '**/*.rb'))
+ROOT = File.expand_path(ARGV[0])
+FILES = Dir.glob(File.join(ROOT, '**/*.rb'))
+CACHE_FILE = 'cache.json'
 
-nodes = files.map do |file|
-  processor = Crystalball::MapGenerator::ParserStrategy::Processor.new
-  {
-    path: file.sub(root, ''),
-    consts_defined: processor.consts_defined_in(file).uniq,
-    consts_interacted_with: processor.consts_interacted_with_in(file).uniq,
-    labels: file.end_with?('_spec.rb') ? 'Spec' : 'File'
-  }
+def load_or_parse_files
+  if File.exist?(CACHE_FILE)
+    JSON.parse(File.read(CACHE_FILE)).map { |h| h.inject({}){|memo,(k,v)| memo[k.to_sym] = v; memo} }
+  else
+    parse_files
+  end
 end
 
+def parse_files
+  result = FILES.map do |file|
+    processor = Crystalball::MapGenerator::ParserStrategy::Processor.new
+    {
+      path: file.sub("#{ROOT}/", ''),
+      consts_defined: processor.consts_defined_in(file).uniq,
+      consts_interacted_with: processor.consts_interacted_with_in(file).uniq,
+      labels: file.end_with?('_spec.rb') ? 'Spec' : 'File'
+    }
+  end
+  File.write(CACHE_FILE, result.to_json)
+
+  result
+end
+
+nodes = load_or_parse_files
+
+require 'neo4j/core'
 require 'neo4j/core/cypher_session/adaptors/http'
 # Adapt to your config
 http_adaptor = Neo4j::Core::CypherSession::Adaptors::HTTP.new('http://neo4j:batata@localhost:7474')
 connection = Neo4j::Core::CypherSession.new(http_adaptor)
 
-def create_relationship(node, const, relationship:, connection:)
-  execute_query("MERGE (:#{node[:labels]} {path: \"#{node[:path]}\"})", connection)
-  execute_query("MERGE (:Const {name: \"#{const}\"})", connection)
-  query = <<~QUERY
+def create_relationship_query(node, const, relationship:)
+  queries = []
+  queries << "MERGE (:#{node[:labels]} {path: \"#{node[:path]}\"})"
+  queries << "MERGE (:Const {name: \"#{const}\"})"
+  queries << <<~QUERY
     MATCH (file:#{node[:labels]} {path: "#{node[:path]}"})
     MATCH (const:Const {name: "#{const}"})
     MERGE (file)-[:#{relationship}]->(const)
   QUERY
-  execute_query(query, connection)
+  queries
 end
 
 def execute_query(query, connection)
@@ -53,12 +71,22 @@ def execute_query(query, connection)
   connection.query(query)
 end
 
-nodes.each do |node|
+queries = nodes.reduce([]) do |result, node|
   node[:consts_defined].each do |const|
-    create_relationship(node, const, relationship: :defines, connection: connection)
+    result.concat create_relationship_query(node, const, relationship: :defines)
   end
   node[:consts_interacted_with].each do |const|
-    create_relationship(node, const, relationship: :interacts_with, connection: connection)
+    result.concat create_relationship_query(node, const, relationship: :interacts_with)
+  end
+  result
+end
+
+queries.each_slice(100) do |qs|
+  connection.queries do
+    qs.each do |q|
+      puts "====", q, "===="
+      append q
+    end
   end
 end
 
@@ -68,6 +96,7 @@ end
 if ENV['SPEC_TIMES_URL']
   require 'faraday'
 
+  puts 'Fetching spec times'
   specs = JSON.parse(Faraday.get(ENV['SPEC_TIMES_URL']).body)
   specs.each do |path, time|
     query = <<~QUERY
