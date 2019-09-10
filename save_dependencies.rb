@@ -100,7 +100,7 @@ if ENV['SPEC_TIMES_URL']
   specs = JSON.parse(Faraday.get(ENV['SPEC_TIMES_URL']).body)
   specs.each do |path, time|
     query = <<~QUERY
-      MATCH (spec:Spec {path: "/#{path}"})
+      MATCH (spec:Spec {path: "#{path}"})
       SET spec.time = #{time}
       RETURN spec
     QUERY
